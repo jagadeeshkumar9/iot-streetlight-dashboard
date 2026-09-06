@@ -1,0 +1,133 @@
+version: '3.8'
+
+services:
+  # MQTT Broker
+  mqtt-broker:
+    image: eclipse-mosquitto:latest
+    container_name: mqtt-broker
+    ports:
+      - "1883:1883"    # MQTT
+      - "9001:9001"    # WebSocket
+    volumes:
+      - ./mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./mqtt/data:/mosquitto/data
+      - ./mqtt/logs:/mosquitto/log
+    environment:
+      - TZ=Asia/Kolkata
+    networks:
+      - iot-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "\$SYS/broker/clients/connected"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # MQTT to Supabase Bridge
+  mqtt-supabase-bridge:
+    build: ./mqtt-bridge
+    container_name: mqtt-supabase-bridge
+    depends_on:
+      - mqtt-broker
+    environment:
+      - MQTT_BROKER=mqtt://mqtt-broker:1883
+      - MQTT_TOPIC=streetlight/#
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SUPABASE_TABLE=sensor_data
+      - NODE_ENV=production
+      - LOG_LEVEL=debug
+    networks:
+      - iot-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Backend API Server
+  backend-api:
+    build: ./backend
+    container_name: iot-backend-api
+    ports:
+      - "5000:5000"
+    depends_on:
+      - mqtt-broker
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - MQTT_BROKER=mqtt://mqtt-broker:1883
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - JWT_SECRET=${JWT_SECRET}
+      - CORS_ORIGIN=http://localhost:3000
+    networks:
+      - iot-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Frontend Dashboard
+  frontend:
+    build: ./frontend
+    container_name: iot-dashboard
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend-api
+    environment:
+      - REACT_APP_API_URL=http://localhost:5000
+      - REACT_APP_SUPABASE_URL=${SUPABASE_URL}
+      - REACT_APP_SUPABASE_KEY=${SUPABASE_KEY}
+    networks:
+      - iot-network
+    restart: unless-stopped
+
+  # InfluxDB for time-series data (optional but recommended)
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - INFLUXDB_DB=iot_streetlight
+      - INFLUXDB_ADMIN_USER=admin
+      - INFLUXDB_ADMIN_PASSWORD=${INFLUXDB_PASSWORD:-admin123}
+      - INFLUXDB_HTTP_AUTH_ENABLED=true
+    volumes:
+      - ./influxdb/data:/var/lib/influxdb2
+    networks:
+      - iot-network
+    restart: unless-stopped
+
+  # Grafana for visualization (optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    volumes:
+      - ./grafana/storage:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - influxdb
+    networks:
+      - iot-network
+    restart: unless-stopped
+
+networks:
+  iot-network:
+    driver: bridge
+
+volumes:
+  mqtt_data:
+  mqtt_logs:
+  influxdb_data:
+  grafana_storage:
